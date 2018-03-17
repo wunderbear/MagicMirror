@@ -5,6 +5,7 @@
  * MIT Licensed.
  */
 
+var request = require("request");
 var ical = require("./vendor/ical.js");
 var moment = require("moment");
 
@@ -22,9 +23,11 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 	 */
 	var fetchCalendar = function() {
 
+		// We've started working, so disable next execution schedule for now
 		clearTimeout(reloadTimer);
 		reloadTimer = null;
 
+		// Build a nice HTTP User-Agent string
 		nodeVersion = Number(process.version.match(/^v(\d+\.\d+)/)[1]);
 		var opts = {
 			headers: {
@@ -32,13 +35,13 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 			}
 		};
 
+		// Arrange HTTP authorization information
 		if (auth) {
 			if(auth.method === "bearer"){
 				opts.auth = {
 					bearer: auth.pass
 				}
-
-			}else{
+			} else {
 				opts.auth = {
 					user: auth.user,
 					pass: auth.pass
@@ -52,154 +55,112 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 			}
 		}
 
-		ical.fromURL(url, opts, function(err, data) {
-			if (err) {
-				fetchFailedCallback(self, err);
-				scheduleTimer();
-				return;
-			}
+		// Invoke the calendar URL with HTTP options from above
+		request.get(url, opts, retrieveCallback);
+	};
 
-			// console.log(data);
-			newEvents = [];
+	// Invoked when HTTP GET to calendar url returns content
+	var retrieveCallback = function(err, response, body) {
+		if(!response || response.statusCode != 200) {
+			console.log("Unable to retrieve data from " + url + 
+			            ". HTTP status code " + response.statusCode);
+			// we will retry later
+			scheduleTimer();
+			return;
+		}
 
-			var limitFunction = function(date, i) {return i < maximumEntries;};
-
-			var eventDate = function(event, time) {
-				return (event[time].length === 8) ? moment(event[time], "YYYYMMDD") : moment(new Date(event[time]));
-			};
-
-			for (var e in data) {
-				var event = data[e];
-				var now = new Date();
-				var today = moment().startOf("day").toDate();
-				var future = moment().startOf("day").add(maximumNumberOfDays, "days").subtract(1,"seconds").toDate(); // Subtract 1 second so that events that start on the middle of the night will not repeat.
-
-				// FIXME:
-				// Ugly fix to solve the facebook birthday issue.
-				// Otherwise, the recurring events only show the birthday for next year.
-				var isFacebookBirthday = false;
-				if (typeof event.uid !== "undefined") {
-					if (event.uid.indexOf("@facebook.com") !== -1) {
-						isFacebookBirthday = true;
-					}
-				}
-
-				if (event.type === "VEVENT") {
-
-					var startDate = eventDate(event, "start");
-					var endDate;
-					if (typeof event.end !== "undefined") {
-						endDate = eventDate(event, "end");
-					} else {
-						if (!isFacebookBirthday) {
-							endDate = startDate;
-						} else {
-							endDate = moment(startDate).add(1, "days");
-						}
-					}
-
-
-					// calculate the duration f the event for use with recurring events.
-					var duration = parseInt(endDate.format("x")) - parseInt(startDate.format("x"));
-
-					if (event.start.length === 8) {
-						startDate = startDate.startOf("day");
-					}
-
-					var title = "Event";
-					if (event.summary) {
-						title = (typeof event.summary.val !== "undefined") ? event.summary.val : event.summary;
-					} else if(event.description) {
-						title = event.description;
-					}
-
-					var excluded = false;
-					for (var f in excludedEvents) {
-						var filter = excludedEvents[f];
-						if (title.toLowerCase().includes(filter.toLowerCase())) {
-							excluded = true;
-							break;
-						}
-					}
-
-					if (excluded) {
-						continue;
-					}
-
-					var location = event.location || false;
-					var geo = event.geo || false;
-					var description = event.description || false;
-
-					if (typeof event.rrule != "undefined" && !isFacebookBirthday) {
-						var rule = event.rrule;
-						var dates = rule.between(today, future, true, limitFunction);
-
-						for (var d in dates) {
-							startDate = moment(new Date(dates[d]));
-							endDate  = moment(parseInt(startDate.format("x")) + duration, "x");
-							if (endDate.format("x") > now) {
-								newEvents.push({
-									title: title,
-									startDate: startDate.format("x"),
-									endDate: endDate.format("x"),
-									fullDayEvent: isFullDayEvent(event),
-									class: event.class,
-									firstYear: event.start.getFullYear(),
-									location: location,
-									geo: geo,
-									description: description
-								});
-							}
-						}
-					} else {
-						// console.log("Single event ...");
-						// Single event.
-						var fullDayEvent = (isFacebookBirthday) ? true : isFullDayEvent(event);
-
-						if (!fullDayEvent && endDate < new Date()) {
-							//console.log("It's not a fullday event, and it is in the past. So skip: " + title);
-							continue;
-						}
-
-						if (fullDayEvent && endDate <= today) {
-							//console.log("It's a fullday event, and it is before today. So skip: " + title);
-							continue;
-						}
-
-						if (startDate > future) {
-							//console.log("It exceeds the maximumNumberOfDays limit. So skip: " + title);
-							continue;
-						}
-
-						// Every thing is good. Add it to the list.
-
-						newEvents.push({
-							title: title,
-							startDate: startDate.format("x"),
-							endDate: endDate.format("x"),
-							fullDayEvent: fullDayEvent,
-							class: event.class,
-							location: location,
-							geo: geo,
-							description: description
-						});
-
-					}
-				}
-			}
-
-			newEvents.sort(function(a, b) {
+		var allEvents = parseCalendar(body);
+		if(allEvents.length > 0) {
+			// filter & sort events, limit number to maxEntries
+			var filteredEvents = filterEvents(allEvents);
+			filteredEvents.sort(function(a, b) {
 				return a.startDate - b.startDate;
 			});
+			filteredEvents = filteredEvents.slice(0, maximumEntries);
+			console.log("Found " + allEvents.length +
+                        " events, after filtering and time slicing " + filteredEvents.length +
+                        " remain from calendar " + url);
 
-			//console.log(newEvents);
+			// translate to event data structure used by magic mirror modules
+			events = [];
+			filteredEvents.forEach(event => {
+				events.push({
+					title: event.summary,
+					startDate: moment(event.startDate.toJSDate()).format("x"),
+					endDate: moment(event.endDate.toJSDate()).format("x"),
+					fullDayEvent: event.fullDayEvent,
+					class: event.class,
+					location: event.location,
+					geo: event.geo,
+					description: event.description
+				});
+			});
 
-			events = newEvents.slice(0, maximumEntries);
-
+			// tell other modules
 			self.broadcastEvents();
-			scheduleTimer();
-		});
+		}
+		else {
+			console.log("No events retrieved from " + url);
+		}
+
+		// ... and play it again, Sam
+		scheduleTimer();
 	};
+
+	/* parseCalendar(icalData)
+	 * Uses ical to parse retrieved data as iCal calendar
+	 */
+	var parseCalendar = function(icalData)
+	{
+		if(icalData === null) return;
+
+		var jcalData = ical.parse(icalData);
+		var comp = new ICAL.Component(jcalData);
+		var vevents = comp.getAllSubcomponents('vevent');
+
+		return vevents;
+	}
+
+	/* filterEvents(vevents)
+	 * Limits an array of vevents to elemant that matter w.r.t.
+	 * caller settings
+	 */
+	var filterEvents = function(vevents)
+	{
+		var debug = true;
+
+		var now = moment();
+		var future = moment().startOf("day").add(maximumNumberOfDays, "days").subtract(1,"seconds"); // Subtract 1 second so that events that start on the middle of the night will not repeat.
+		var goodEvents = [];
+
+		for (const vevent of vevents) {
+			var event = new ICAL.Event(vevent);
+			var startDate = moment(event.startDate.toJSDate());
+			var endDate = moment(event.endDate.toJSDate());
+
+			if(endDate.isBefore(now))     // we're not interested in past events
+			{
+				if(debug) console.log("Skipped past event" + 
+							          ", title: " + event.summary + 
+									  ", begin: " + startDate.toISOString() + 
+									  ", end: " + endDate.toISOString()); 
+				continue;      
+			}
+
+			if(startDate.isAfter(future)) // we're not interested in far out events
+			{ 
+				if(debug) console.log("Skipped far future event" + 
+							          ", title: " + event.summary + 
+									  ", begin: " + startDate.toISOString() + 
+									  ", end: " + endDate.toISOString()); 				
+				continue;  
+			}
+
+			goodEvents.push(event);
+		}
+
+		return goodEvents;
+	}
 
 	/* scheduleTimer()
 	 * Schedule the timer for the next update.
