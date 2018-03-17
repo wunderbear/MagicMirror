@@ -64,8 +64,9 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 		if(!response || response.statusCode != 200) {
 			console.log("Unable to retrieve data from " + url + 
 			            ". HTTP status code " + response.statusCode);
-			// we will retry later
-			scheduleTimer();
+			// we will retry again in 10s
+			// TODO: add backoff strategy
+			scheduleTimer(10 * 1000);
 			return;
 		}
 
@@ -104,7 +105,7 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 		}
 
 		// ... and play it again, Sam
-		scheduleTimer();
+		scheduleTimer(reloadInterval);
 	};
 
 	/* parseCalendar(icalData)
@@ -165,12 +166,12 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 	/* scheduleTimer()
 	 * Schedule the timer for the next update.
 	 */
-	var scheduleTimer = function() {
+	var scheduleTimer = function(interval) {
 		//console.log('Schedule update timer.');
 		clearTimeout(reloadTimer);
 		reloadTimer = setTimeout(function() {
 			fetchCalendar();
-		}, reloadInterval);
+		}, interval);
 	};
 
 	/* isFullDayEvent(event)
