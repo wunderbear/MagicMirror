@@ -15,6 +15,8 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 	var reloadTimer = null;
 	var events = [];
 
+	var failedRetrievals = 0;
+
 	var fetchFailedCallback = function() {};
 	var eventsReceivedCallback = function() {};
 
@@ -63,13 +65,22 @@ var CalendarFetcher = function(url, reloadInterval, excludedEvents, maximumEntri
 	var retrieveCallback = function(err, response, body) {
 		if(!response || response.statusCode != 200) {
 			console.log("Unable to retrieve data from " + url + 
-			            ". HTTP status code " + response.statusCode);
-			// we will retry again in 10s
-			// TODO: add backoff strategy
-			scheduleTimer(10 * 1000);
+						". HTTP status code " + response.statusCode);
+						
+			// we will retry again several times after 10s, then wait for a longer time
+			if(failedRetrievals < 3) {
+				failedRetrievals++;				
+				scheduleTimer(10000);
+			} else {
+				failedRetrievals = 0
+				scheduleTimer(reloadInterval);
+			}
 			return;
 		}
 
+		// successfully retrieved calendar
+		failedRetrievals = 0
+		
 		var allEvents = parseCalendar(body);
 		if(allEvents.length > 0) {
 			// filter & sort events, limit number to maxEntries
